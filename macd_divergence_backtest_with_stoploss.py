@@ -1,12 +1,95 @@
+
+
 """
 MACD底背离/顶背离策略回测系统（带止损功能）
 适用于三六零(601360.SH) 15分钟级别行情
 
-止损类型：
-1. 固定比例止损 - 买入价下跌X%自动止损
-2. 移动止损 - 盈利后跟踪最高价回撤X%止损
-3. 时间止损 - 持仓超过N个周期无盈利止损
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                            策略逻辑
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+【买入决策流程】
+┌─────────────────────────────────────────────────────────────────────┐
+│ 第一步：15分钟级别底背离检测                                          │
+│        ├─ 价格创近期新低（最近两个局部低点，后低 < 前低）               │
+│        └─ MACD柱子未同步创低（对应低点的MACD柱子，后柱 >= 前柱）        │
+│                 ↓                                                    │
+│        检测到 → 进入第二步；未检测到 → 观望                            │
+├─────────────────────────────────────────────────────────────────────┤
+│ 第二步：5分钟趋势过滤                                                 │
+│        ├─ 下降趋势判定：MA55 < MA89 < MA181 < MA420                   │
+│        │                 ↓                                            │
+│        │         趋势向下 → 进入多级别确认流程                         │
+│        │                 ↓                                            │
+│        │         第三步：30分钟级别底背离确认                          │
+│        │                 ├─ 无底背离 → 进入观望等待30分钟底背离         │
+│        │                 │   • 后续每个周期检查30分钟底背离              │
+│        │                 │   • 出现底背离后进入第四步                    │
+│        │                 └─ 有底背离 → 进入第四步                        │
+│        │                            ↓                                 │
+│        │         第四步：5分钟趋势二次过滤                             │
+│        │                 ├─ MA89 < MA181 < MA420 → 观望等待            │
+│        │                 │   • 等待条件1：股价站上5分钟MA420线          │
+│        │                 │   • 等待条件2：5分钟MA181线拐头向上          │
+│        │                 └─ 其他情况 → 直接买入                         │
+│        │                                                             │
+│        └─ 趋势非向下 → 直接买入（无需多级别确认）                       │
+└─────────────────────────────────────────────────────────────────────┘
+
+【买入信号类型说明】
+├─ 底背离               → 15分钟底背离 + 5分钟趋势非向下
+└─ 底背离(30分钟确认)   → 15分钟底背离 + 5分钟趋势向下 + 30分钟底背离
+
+【卖出决策流程】
+┌─────────────────────────────────────────────────────────────────────┐
+│ 有持仓时，每根K线检查以下条件（优先级从高到低）：                        │
+│  1. 移动止损（盈利后启用）                                            │
+│     └─ 当前价 <= 持仓最高价 × (1 - 移动止损比例)                        │
+│  2. 固定止损（需启用USE_FIXED_STOP）                                  │
+│     └─ 当前价 <= 买入价 × (1 - 固定止损比例)                           │
+│  3. 趋势止损（亏损>3%时启用）                                         │
+│     └─ 15分钟级别 MA24 < MA55 < MA89（空头排列）                       │
+│  4. 顶背离卖出（根据买入信号类型动态调整级别）                            │
+│     ├─ 买入类型为"底背离" → 15分钟级别顶背离                           │
+│     └─ 买入类型为"底背离(30分钟确认)" → 30分钟顶背离清仓，配合分批止盈         │
+│         • 获利>10%: 卖出初始仓位的1/3                                    │
+│         • 获利>15%: 再卖出初始仓位的1/3                                  │
+│  5. 回测结束强制平仓                                                  │
+└─────────────────────────────────────────────────────────────────────┘
+
+【止损类型说明】
+├─ 固定比例止损   → 买入价下跌X%自动止损（需启用）
+├─ 移动止损       → 盈利后跟踪最高价回撤X%止损（始终启用）
+└─ 趋势止损       → 亏损>3%且15分钟均线空头排列时止损
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
+
+# ========== 策略配置参数 ==========
+# 股票代码
+STOCK_CODE = '601360.SH'
+# K线周期
+PERIOD = '15m'
+# 初始资金（元）
+INITIAL_CAPITAL = 100000
+# 回测时间范围
+BACKTEST_START = '20250801'
+BACKTEST_END = '20260201'
+
+# 止损参数
+STOP_LOSS_PCT = 0.03      # 固定止损比例 3%
+TRAILING_STOP_PCT = 0.05  # 移动止损比例 5%
+USE_FIXED_STOP = False    # 是否启用固定止损
+
+# 趋势过滤参数
+ENABLE_TREND_FILTER = True    # 是否启用趋势过滤
+TREND_PERIOD = '5m'          # 趋势判断周期
+TREND_MA_PERIODS = [89, 181, 420]  # 判断趋势的均线周期
+
+# 多级别确认参数
+CONFIRM_PERIOD_30M = '30m'   # 30分钟确认周期
+CONFIRM_PERIOD_60M = '60m'   # 60分钟确认周期
+# ==================================
 
 from tqcenter import tq, tqconst
 import pandas as pd
@@ -109,6 +192,11 @@ class MACDDivergenceBacktestWithStopLoss:
         # 多级别确认参数
         self.confirm_period_30m = '30m'  # 30分钟确认周期
         self.confirm_period_60m = '60m'  # 60分钟确认周期
+        
+        # 观望等待状态
+        self.waiting_for_trend = False  # 是否处于观望等待5分钟趋势状态
+        self.waiting_for_30min_div = False  # 是否处于观望等待30分钟底背离状态
+        self.waiting_entry_price = 0.0  # 观望时的入场价格
         
     def calculate_macd(self, close_prices):
         """计算MACD指标"""
@@ -518,6 +606,49 @@ class MACDDivergenceBacktestWithStopLoss:
         result, _ = self.detect_bullish_divergence(close_prices, macd_df['MACD'])
         return result
     
+    def detect_bearish_divergence_at_period(self, timestamp, period) -> bool:
+        """
+        检测指定周期的顶背离信号
+        
+        Args:
+            timestamp: 当前回测时间戳，用于获取历史数据
+            period: K线周期（如 '30m', '60m'）
+            
+        Returns:
+            bool: 是否检测到该周期的顶背离
+        """
+        # 获取指定周期数据（需要足够的数据计算MACD和极值点）
+        data = tq.get_market_data(
+            field_list=[],
+            stock_list=[self.stock_code],
+            period=period,
+            count=100,  # 足够的数据用于检测顶背离
+            end_time=timestamp.strftime('%Y%m%d%H%M%S'),
+            dividend_type='front'
+        )
+        
+        if not data:
+            return False
+        
+        # 查找收盘价字段
+        close_field = None
+        for field in ['Close', 'close', 'CLOSE']:
+            if field in data:
+                close_field = field
+                break
+        
+        if close_field is None:
+            return False
+        
+        close_prices = data[close_field][self.stock_code]
+        
+        # 计算MACD
+        macd_df = self.calculate_macd(close_prices)
+        
+        # 检测顶背离
+        result = self.detect_bearish_divergence(close_prices, macd_df['MACD'])
+        return result
+    
     def get_share_count(self, price):
         """计算可买入的股票数量"""
         available_funds = self.current_capital * 0.9
@@ -539,12 +670,15 @@ class MACDDivergenceBacktestWithStopLoss:
         amount = price * max_shares
         self.current_capital -= amount
         self.position = max_shares
+        self.initial_position = max_shares  # 记录初始仓位，用于分批止盈计算
         self.position_value = amount
         self.buy_price = price
         self.buy_amount = amount
         self.highest_price = price
         self.lowest_price = price
         self.buy_bar_count = 0  # 重置买入后K线计数
+        self.take_profit_10 = False  # 标记是否已执行10%止盈
+        self.take_profit_15 = False  # 标记是否已执行15%止盈
         
         self.trade_id += 1
         trade = TradeRecord(
@@ -563,16 +697,25 @@ class MACDDivergenceBacktestWithStopLoss:
         
         return True
     
-    def sell(self, timestamp, price, signal_type='顶背离'):
-        """执行卖出"""
+    def sell(self, timestamp, price, signal_type='顶背离', volume=None):
+        """执行卖出（支持部分卖出）"""
         if self.position <= 0:
             return False
         
-        amount = price * self.position
-        pnl = amount - self.buy_amount
-        pnl_pct = (pnl / self.buy_amount) * 100
+        # 如果未指定卖出数量，则卖出全部仓位
+        if volume is None:
+            volume = self.position
+        
+        # 确保卖出数量不超过持仓数量
+        volume = min(volume, self.position)
+        
+        amount = price * volume
+        # 计算本次卖出的盈亏（按比例计算）
+        pnl = amount - (self.buy_amount * volume / self.initial_position)
+        pnl_pct = (pnl / (self.buy_amount * volume / self.initial_position)) * 100 if volume > 0 else 0
         
         self.current_capital += amount
+        self.position -= volume
         
         self.trade_id += 1
         trade = TradeRecord(
@@ -581,7 +724,7 @@ class MACDDivergenceBacktestWithStopLoss:
             stock_code=self.stock_code,
             trade_type='SELL',
             price=price,
-            volume=self.position,
+            volume=volume,
             amount=amount,
             signal_type=signal_type,
             pnl=pnl
@@ -694,65 +837,174 @@ class MACDDivergenceBacktestWithStopLoss:
                 if should_stop:
                     self.sell(current_time, current_price, stop_type)
                 else:
-                    # 检查顶背离卖出信号
-                    bearish_div = self.detect_bearish_divergence(lookback_prices, lookback_macd)
-                    if bearish_div:
-                        self.sell(current_time, current_price, '顶背离')
+                    # 检查顶背离卖出信号（根据买入信号类型动态调整检测级别）
+                    # 找到最后一次买入交易记录
+                    buy_trades = [t for t in self.trades if t.trade_type == 'BUY']
+                    buy_signal_type = buy_trades[-1].signal_type if buy_trades else '底背离'
+                    
+                    if buy_signal_type == '底背离(30分钟确认)':
+                        # 30分钟顶背离清仓
+                        bearish_div_30min = self.detect_bearish_divergence_at_period(current_time, self.confirm_period_30m)
+                        if bearish_div_30min:
+                            print(f"  [卖出] {current_time} @ {current_price:.2f} | 30分钟顶背离清仓")
+                            self.sell(current_time, current_price, '顶背离(30分钟清仓)')
+                        else:
+                            # 分批止盈检查
+                            profit_pct = (current_price - self.buy_price) / self.buy_price * 100
+                            
+                            # 获利>10%时，卖出初始仓位的1/3
+                            if profit_pct > 10 and not self.take_profit_10 and self.position > 0:
+                                sell_volume = int(self.initial_position / 3 / 100) * 100  # 取整到100股的倍数
+                                if sell_volume >= 100:
+                                    print(f"  [卖出] {current_time} @ {current_price:.2f} | 获利{profit_pct:.1f}%，卖出{sell_volume}股（1/3仓位）")
+                                    self.sell(current_time, current_price, '止盈(10%)', volume=sell_volume)
+                                    self.take_profit_10 = True
+                            
+                            # 获利>15%时，再卖出初始仓位的1/3
+                            elif profit_pct > 15 and not self.take_profit_15 and self.position > 0:
+                                sell_volume = int(self.initial_position / 3 / 100) * 100
+                                if sell_volume >= 100:
+                                    print(f"  [卖出] {current_time} @ {current_price:.2f} | 获利{profit_pct:.1f}%，卖出{sell_volume}股（1/3仓位）")
+                                    self.sell(current_time, current_price, '止盈(15%)', volume=sell_volume)
+                                    self.take_profit_15 = True
+                            
+                            else:
+                                print(f"  [持有] {current_time} 继续持有（未触发卖出条件）")
                     else:
-                        print(f"  [持有] {current_time} 继续持有（未触发卖出条件）")
+                        # 普通底背离买入的，15分钟级别顶背离即可卖出
+                        bearish_div = self.detect_bearish_divergence(lookback_prices, lookback_macd)
+                        if bearish_div:
+                            self.sell(current_time, current_price, '顶背离')
+                        else:
+                            print(f"  [持有] {current_time} 继续持有（未触发卖出条件）")
             
             else:
-                # 无持仓，检查买入信号
-                bullish_div, div_details = self.detect_bullish_divergence(lookback_prices, lookback_macd)
-                if bullish_div:
-                    # 趋势过滤：检查5分钟级别是否处于下降趋势（传入当前时间戳获取历史数据）
+                # 无持仓，先检查是否处于观望等待状态
+                if self.waiting_for_30min_div:
+                    # 等待30分钟底背离状态：检查30分钟级别是否出现底背离
+                    div_30min = self.detect_bullish_divergence_at_period(current_time, self.confirm_period_30m)
+                    if div_30min:
+                        print(f"  [触发] {current_time} 30分钟底背离出现，继续买入流程")
+                        self.waiting_for_30min_div = False
+                        
+                        # 进入第四步：5分钟趋势二次过滤
+                        is_downward, trend_details = self.is_downward_trend(current_time)
+                        ma89_less_181 = trend_details.get('condition2')
+                        ma181_less_420 = trend_details.get('condition1')
+                        
+                        if ma89_less_181 and ma181_less_420:
+                            # 满足 MA89 < MA181 < MA420，进入观望等待状态
+                            self.waiting_for_trend = True
+                            self.waiting_entry_price = current_price
+                            print(f"  [观望] {current_time} 5分钟趋势仍向下(MA89<MA181<MA420)，等待趋势好转")
+                        else:
+                            # 不满足严格下降趋势，直接买入
+                            print(f"  [买入] {current_time} @ {current_price:.2f} | {self.get_share_count(current_price)}股")
+                            print(f"        ┌─────────────────────────────────────────────────────────────┐")
+                            print(f"        │ 【买入详细分析】")
+                            print(f"        │")
+                            print(f"        │ ┌─ 观望等待结束:")
+                            print(f"        │ │   • 30分钟底背离出现")
+                            print(f"        │")
+                            print(f"        │ ┌─ 交易信息:")
+                            print(f"        │ │   • 可用资金: {self.current_capital:.2f}")
+                            print(f"        │ │   • 买入价格: {current_price:.2f}")
+                            print(f"        │ │   • 买入股数: {self.get_share_count(current_price)}")
+                            print(f"        │")
+                            print(f"        │ 买入信号类型: 底背离(30分钟确认)")
+                            print(f"        └─────────────────────────────────────────────────────────────┘")
+                            self.buy(current_time, current_price, '底背离(30分钟确认)')
+                    else:
+                        print(f"  [观望] {current_time} 等待30分钟底背离买点")
+                
+                elif self.waiting_for_trend:
+                    # 检查观望买入条件
+                    # 条件1: 股价站上5分钟MA420线
+                    # 条件2: 5分钟MA181线拐头向上
                     is_downward, trend_details = self.is_downward_trend(current_time)
-                    if is_downward:
-                        self.filtered_signals_count += 1
-                        print(f"  [过滤] {current_time} 底背离信号被过滤（5分钟趋势向下）")
-                        # 二次确认：检查30分钟级别是否存在底背离
-                        div_30min = self.detect_bullish_divergence_at_period(current_time, self.confirm_period_30m)
-                        if div_30min:
-                            print(f"  [过滤] {current_time} 30分钟底背离也被5分钟趋势过滤")
-                            # 三次确认：检查60分钟级别是否存在底背离
-                            div_60min = self.detect_bullish_divergence_at_period(current_time, self.confirm_period_60m)
-                            if div_60min:
-                                print(f"  [买入] {current_time} @ {current_price:.2f} | {self.get_share_count(current_price)}股")
-                                print(f"        ┌─────────────────────────────────────────────────────────────┐")
-                                print(f"        │ 【买入详细分析】")
-                                print(f"        │")
-                                print(f"        │ ┌─ 15分钟底背离检测结果:")
-                                print(f"        │ │   • 第1个低点(索引{div_details.get('price_low_index_1')}): 价格={div_details.get('price_low_1')}, MACD={div_details.get('macd_at_low_1')}")
-                                print(f"        │ │   • 第2个低点(索引{div_details.get('price_low_index_2')}): 价格={div_details.get('price_low_2')}, MACD={div_details.get('macd_at_low_2')}")
-                                print(f"        │ │   • 价格创更低: {div_details.get('price_lower_low')}")
-                                print(f"        │ │   • MACD未创更低: {div_details.get('macd_not_lower_low')}")
-                                print(f"        │ │   • 底背离判定: {div_details.get('divergence_detected')}")
-                                print(f"        │")
-                                print(f"        │ ┌─ 5分钟趋势过滤结果:")
-                                print(f"        │ │   • MA55({trend_details.get('ma55')}) < MA89({trend_details.get('ma89')}): {trend_details.get('condition3')}")
-                                print(f"        │ │   • MA89({trend_details.get('ma89')}) < MA181({trend_details.get('ma181')}): {trend_details.get('condition2')}")
-                                print(f"        │ │   • MA181({trend_details.get('ma181')}) < MA420({trend_details.get('ma420')}): {trend_details.get('condition1')}")
-                                print(f"        │ │   • 下降趋势判定: {is_downward} (被过滤)")
-                                print(f"        │")
-                                print(f"        │ ┌─ 多级别确认:")
-                                print(f"        │ │   • 30分钟底背离: 检测到 ✓")
-                                print(f"        │ │   • 60分钟底背离: 检测到 ✓")
-                                print(f"        │ │   • 触发级联买入条件")
-                                print(f"        │")
-                                print(f"        │ ┌─ 交易信息:")
-                                print(f"        │ │   • 可用资金: {self.current_capital:.2f}")
-                                print(f"        │ │   • 买入价格: {current_price:.2f}")
-                                print(f"        │ │   • 买入股数: {self.get_share_count(current_price)}")
-                                print(f"        │ │   • 买入金额: {(current_price * self.get_share_count(current_price)):.2f}")
-                                print(f"        │ │   • 剩余资金: {(self.current_capital - current_price * self.get_share_count(current_price) * 0.9):.2f}")
-                                print(f"        │")
-                                print(f"        │ 买入信号类型: 底背离(60分钟确认)")
-                                print(f"        └─────────────────────────────────────────────────────────────┘")
-                                self.buy(current_time, current_price, '底背离(60分钟确认)')
-                            else:
-                                # 60分钟无底背离，检查60分钟趋势是否非向下
-                                is_60min_downward, trend_60min_details = self.is_downward_trend_at_period(current_time, '60m')
-                                if not is_60min_downward:
+                    ma420 = trend_details.get('ma420', 0)
+                    ma181 = trend_details.get('ma181', 0)
+                    
+                    # 获取MA181的历史值判断是否拐头向上
+                    data = tq.get_market_data(
+                        field_list=[],
+                        stock_list=[self.stock_code],
+                        period='5m',
+                        count=420,
+                        end_time=current_time.strftime('%Y%m%d%H%M%S'),
+                        dividend_type='front'
+                    )
+                    
+                    ma181_turned_up = False
+                    price_above_ma420 = False
+                    
+                    if data:
+                        close_field_5m = None
+                        for field in ['Close', 'close', 'CLOSE']:
+                            if field in data:
+                                close_field_5m = field
+                                break
+                        
+                        if close_field_5m:
+                            close_prices_5m = data[close_field_5m][self.stock_code]
+                            ma181_history = close_prices_5m.rolling(181).mean()
+                            
+                            # 检查MA181是否拐头向上（最近3根K线MA181值递增）
+                            if len(ma181_history) >= 3:
+                                ma181_recent = ma181_history.iloc[-3:]
+                                if ma181_recent.is_monotonic_increasing:
+                                    ma181_turned_up = True
+                            
+                            # 检查股价是否站上MA420
+                            if len(close_prices_5m) > 0 and current_price >= ma420:
+                                price_above_ma420 = True
+                    
+                    if price_above_ma420 or ma181_turned_up:
+                        # 满足买入条件，执行买入
+                        print(f"  [买入] {current_time} @ {current_price:.2f} | {self.get_share_count(current_price)}股")
+                        print(f"        ┌─────────────────────────────────────────────────────┐")
+                        print(f"        │ 【买入详细分析】")
+                        print(f"        │")
+                        print(f"        │ ┌─ 观望等待结束:")
+                        print(f"        │ │   • 股价站上MA420: {price_above_ma420}")
+                        print(f"        │ │   • MA181拐头向上: {ma181_turned_up}")
+                        print(f"        │")
+                        print(f"        │ ┌─ 交易信息:")
+                        print(f"        │ │   • 可用资金: {self.current_capital:.2f}")
+                        print(f"        │ │   • 买入价格: {current_price:.2f}")
+                        print(f"        │ │   • 买入股数: {self.get_share_count(current_price)}")
+                        print(f"        │")
+                        print(f"        │ 买入信号类型: 底背离(观望确认)")
+                        print(f"        └─────────────────────────────────────────────────────┘")
+                        self.buy(current_time, current_price, '底背离(观望确认)')
+                        self.waiting_for_trend = False  # 重置观望状态
+                    else:
+                        print(f"  [观望] {current_time} 等待趋势好转 (股价={current_price:.2f}, MA420={ma420:.2f})")
+                
+                else:
+                    # 无持仓且未处于观望状态，检查买入信号
+                    bullish_div, div_details = self.detect_bullish_divergence(lookback_prices, lookback_macd)
+                    if bullish_div:
+                        # 趋势过滤：检查5分钟级别是否处于下降趋势（传入当前时间戳获取历史数据）
+                        is_downward, trend_details = self.is_downward_trend(current_time)
+                        if is_downward:
+                            self.filtered_signals_count += 1
+                            print(f"  [过滤] {current_time} 底背离信号被过滤（5分钟趋势向下）")
+                            # 二次确认：检查30分钟级别是否存在底背离
+                            div_30min = self.detect_bullish_divergence_at_period(current_time, self.confirm_period_30m)
+                            if div_30min:
+                                # 第四步：5分钟趋势二次过滤
+                                # 检查是否满足 MA89 < MA181 < MA420
+                                ma89_less_181 = trend_details.get('condition2')  # MA89 < MA181
+                                ma181_less_420 = trend_details.get('condition1')  # MA181 < MA420
+                            
+                                if ma89_less_181 and ma181_less_420:
+                                    # 满足 MA89 < MA181 < MA420，进入观望等待状态
+                                    self.waiting_for_trend = True
+                                    self.waiting_entry_price = current_price
+                                    print(f"  [观望] {current_time} 5分钟趋势仍向下(MA89<MA181<MA420)，等待趋势好转")
+                                else:
+                                    # 不满足严格下降趋势，直接买入
                                     print(f"  [买入] {current_time} @ {current_price:.2f} | {self.get_share_count(current_price)}股")
                                     print(f"        ┌─────────────────────────────────────────────────────────────┐")
                                     print(f"        │ 【买入详细分析】")
@@ -772,18 +1024,7 @@ class MACDDivergenceBacktestWithStopLoss:
                                     print(f"        │")
                                     print(f"        │ ┌─ 多级别确认:")
                                     print(f"        │ │   • 30分钟底背离: 检测到 ✓")
-                                    print(f"        │ │   • 60分钟底背离: 未检测到")
-                                    print(f"        │ │   • 60分钟趋势非向下: {not is_60min_downward}")
                                     print(f"        │ │   • 触发级联买入条件")
-                                    print(f"        │")
-                                    print(f"        │ ┌─ 60分钟MACD柱子判断:")
-                                    print(f"        │ │   • MACD柱子1: {trend_60min_details.get('macd_bar_1')}")
-                                    print(f"        │ │   • MACD柱子2: {trend_60min_details.get('macd_bar_2')}")
-                                    print(f"        │ │   • MACD柱子3: {trend_60min_details.get('macd_bar_3')}")
-                                    print(f"        │ │   • 柱子1→2上涨: {trend_60min_details.get('bar_1_to_2_rising')}")
-                                    print(f"        │ │   • 柱子2→3上涨: {trend_60min_details.get('bar_2_to_3_rising')}")
-                                    print(f"        │ │   • 连续3根上涨: {trend_60min_details.get('continuous_rising')}")
-                                    print(f"        │ │   • 下降趋势判定: {is_60min_downward}")
                                     print(f"        │")
                                     print(f"        │ ┌─ 交易信息:")
                                     print(f"        │ │   • 可用资金: {self.current_capital:.2f}")
@@ -792,43 +1033,43 @@ class MACDDivergenceBacktestWithStopLoss:
                                     print(f"        │ │   • 买入金额: {(current_price * self.get_share_count(current_price)):.2f}")
                                     print(f"        │ │   • 剩余资金: {(self.current_capital - current_price * self.get_share_count(current_price) * 0.9):.2f}")
                                     print(f"        │")
-                                    print(f"        │ 买入信号类型: 底背离(30分钟确认+60分钟趋势)")
+                                    print(f"        │ 买入信号类型: 底背离(30分钟确认)")
                                     print(f"        └─────────────────────────────────────────────────────────────┘")
-                                    self.buy(current_time, current_price, '底背离(30分钟确认+60分钟趋势)')
-                                else:
-                                    print(f"  [等待] {current_time} 60分钟级别未确认底背离且趋势向下")
+                                    self.buy(current_time, current_price, '底背离(30分钟确认)')
+                            else:
+                                # 30分钟无底背离，进入观望等待状态
+                                self.waiting_for_30min_div = True
+                                print(f"  [观望] {current_time} 30分钟级别未确认底背离，等待30分钟底背离买点")
                         else:
-                            print(f"  [等待] {current_time} 30分钟级别未确认底背离")
+                            print(f"  [买入] {current_time} @ {current_price:.2f} | {self.get_share_count(current_price)}股")
+                            print(f"        ┌─────────────────────────────────────────────────────────────┐")
+                            print(f"        │ 【买入详细分析】")
+                            print(f"        │")
+                            print(f"        │ ┌─ 15分钟底背离检测结果:")
+                            print(f"        │ │   • 第1个低点(索引{div_details.get('price_low_index_1')}): 价格={div_details.get('price_low_1')}, MACD={div_details.get('macd_at_low_1')}")
+                            print(f"        │ │   • 第2个低点(索引{div_details.get('price_low_index_2')}): 价格={div_details.get('price_low_2')}, MACD={div_details.get('macd_at_low_2')}")
+                            print(f"        │ │   • 价格创更低: {div_details.get('price_lower_low')}")
+                            print(f"        │ │   • MACD未创更低: {div_details.get('macd_not_lower_low')}")
+                            print(f"        │ │   • 底背离判定: {div_details.get('divergence_detected')}")
+                            print(f"        │")
+                            print(f"        │ ┌─ 5分钟趋势过滤结果:")
+                            print(f"        │ │   • MA55({trend_details.get('ma55')}) < MA89({trend_details.get('ma89')}): {trend_details.get('condition3')}")
+                            print(f"        │ │   • MA89({trend_details.get('ma89')}) < MA181({trend_details.get('ma181')}): {trend_details.get('condition2')}")
+                            print(f"        │ │   • MA181({trend_details.get('ma181')}) < MA420({trend_details.get('ma420')}): {trend_details.get('condition1')}")
+                            print(f"        │ │   • 下降趋势判定: {is_downward} (趋势过滤通过)")
+                            print(f"        │")
+                            print(f"        │ ┌─ 交易信息:")
+                            print(f"        │ │   • 可用资金: {self.current_capital:.2f}")
+                            print(f"        │ │   • 买入价格: {current_price:.2f}")
+                            print(f"        │ │   • 买入股数: {self.get_share_count(current_price)}")
+                            print(f"        │ │   • 买入金额: {(current_price * self.get_share_count(current_price)):.2f}")
+                            print(f"        │ │   • 剩余资金: {(self.current_capital - current_price * self.get_share_count(current_price) * 0.9):.2f}")
+                            print(f"        │")
+                            print(f"        │ 买入信号类型: 底背离")
+                            print(f"        └─────────────────────────────────────────────────────────────┘")
+                            self.buy(current_time, current_price, '底背离')
                     else:
-                        print(f"  [买入] {current_time} @ {current_price:.2f} | {self.get_share_count(current_price)}股")
-                        print(f"        ┌─────────────────────────────────────────────────────────────┐")
-                        print(f"        │ 【买入详细分析】")
-                        print(f"        │")
-                        print(f"        │ ┌─ 15分钟底背离检测结果:")
-                        print(f"        │ │   • 第1个低点(索引{div_details.get('price_low_index_1')}): 价格={div_details.get('price_low_1')}, MACD={div_details.get('macd_at_low_1')}")
-                        print(f"        │ │   • 第2个低点(索引{div_details.get('price_low_index_2')}): 价格={div_details.get('price_low_2')}, MACD={div_details.get('macd_at_low_2')}")
-                        print(f"        │ │   • 价格创更低: {div_details.get('price_lower_low')}")
-                        print(f"        │ │   • MACD未创更低: {div_details.get('macd_not_lower_low')}")
-                        print(f"        │ │   • 底背离判定: {div_details.get('divergence_detected')}")
-                        print(f"        │")
-                        print(f"        │ ┌─ 5分钟趋势过滤结果:")
-                        print(f"        │ │   • MA55({trend_details.get('ma55')}) < MA89({trend_details.get('ma89')}): {trend_details.get('condition3')}")
-                        print(f"        │ │   • MA89({trend_details.get('ma89')}) < MA181({trend_details.get('ma181')}): {trend_details.get('condition2')}")
-                        print(f"        │ │   • MA181({trend_details.get('ma181')}) < MA420({trend_details.get('ma420')}): {trend_details.get('condition1')}")
-                        print(f"        │ │   • 下降趋势判定: {is_downward} (趋势过滤通过)")
-                        print(f"        │")
-                        print(f"        │ ┌─ 交易信息:")
-                        print(f"        │ │   • 可用资金: {self.current_capital:.2f}")
-                        print(f"        │ │   • 买入价格: {current_price:.2f}")
-                        print(f"        │ │   • 买入股数: {self.get_share_count(current_price)}")
-                        print(f"        │ │   • 买入金额: {(current_price * self.get_share_count(current_price)):.2f}")
-                        print(f"        │ │   • 剩余资金: {(self.current_capital - current_price * self.get_share_count(current_price) * 0.9):.2f}")
-                        print(f"        │")
-                        print(f"        │ 买入信号类型: 底背离")
-                        print(f"        └─────────────────────────────────────────────────────────────┘")
-                        self.buy(current_time, current_price, '底背离')
-                else:
-                    print(f"  [等待] {current_time} 无买入信号（未检测到15分钟级别底背离）")
+                        print(f"  [等待] {current_time} 无买入信号（未检测到15分钟级别底背离）")
             
             # 更新权益曲线
             self.update_equity(current_time, current_price)
@@ -985,22 +1226,31 @@ def run_backtest():
     tq.initialize(__file__)
     
     try:
-        # 创建回测实例
+        # 创建回测实例（使用文件开头的配置参数）
         backtest = MACDDivergenceBacktestWithStopLoss(
-            stock_code='601360.SH',
-            period='15m',
-            initial_capital=100000
+            stock_code=STOCK_CODE,
+            period=PERIOD,
+            initial_capital=INITIAL_CAPITAL
         )
         
-        # 可以调整止损参数
-        # backtest.stop_loss_pct = 0.05      # 5%固定止损
-        # backtest.trailing_stop_pct = 0.08  # 8%移动止损
-        # backtest.time_stop_bars = 30       # 30根K线时间止损
+        # 应用止损参数
+        backtest.stop_loss_pct = STOP_LOSS_PCT
+        backtest.trailing_stop_pct = TRAILING_STOP_PCT
+        backtest.use_fixed_stop = USE_FIXED_STOP
         
-        # 执行回测
+        # 应用趋势过滤参数
+        backtest.enable_trend_filter = ENABLE_TREND_FILTER
+        backtest.trend_period = TREND_PERIOD
+        backtest.trend_ma_periods = TREND_MA_PERIODS
+        
+        # 应用多级别确认参数
+        backtest.confirm_period_30m = CONFIRM_PERIOD_30M
+        backtest.confirm_period_60m = CONFIRM_PERIOD_60M
+        
+        # 执行回测（使用配置的时间范围）
         result = backtest.run_backtest(
-            start_time='20250101',
-            end_time='20260509'
+            start_time=BACKTEST_START,
+            end_time=BACKTEST_END
         )
         
         if result:
